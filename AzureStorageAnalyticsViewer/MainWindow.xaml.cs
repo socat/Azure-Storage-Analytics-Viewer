@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Security.AccessControl;
 using System.Text;
@@ -59,7 +60,7 @@ namespace AzureStorageAnalyticsViewer
             access_cb.SelectedIndex = 0;
             trans_cb.ItemsSource = new string[] { "All" };
             trans_cb.SelectedIndex = 0;
-            storage_cb.ItemsSource = new StorageType[] { StorageType.Blob, StorageType.Table, StorageType.Queue };
+            storage_cb.ItemsSource = new StorageType[] { StorageType.Table, StorageType.Blob, StorageType.Queue };
             storage_cb.SelectedIndex = 0;
 
             // init chart series
@@ -115,7 +116,9 @@ namespace AzureStorageAnalyticsViewer
 
                 var startdate = start_dp.SelectedDate.Value.Add((TimeSpan)start_cb.SelectedItem);
                 var enddate = end_dp.SelectedDate.Value.Add((TimeSpan)end_cb.SelectedItem);
+                
 
+                // hours or minutes, if < 4 hours, show minutes!
                 _mtes = DownloadTransactionMetrics(type, startdate, enddate);
 
                 tcp1.DataContext = CompressDataPoints(_mtes);
@@ -123,6 +126,15 @@ namespace AzureStorageAnalyticsViewer
 
                 tl_tb.Text = string.Format("{0} - {1} {2} Metrics ({3};{4})", startdate, enddate, type,
                     access_cb.SelectedValue, trans_cb.SelectedValue);
+
+                if (((enddate > DateTime.Now ? DateTime.Now : enddate) - startdate).TotalHours < 48)
+                {
+                    _mtes = DownloadTransactionMetrics(type, startdate, enddate, true);
+                    if (_mtes.Any())
+                    {
+                        tcp1.DataContext = CompressDataPoints(_mtes);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -130,45 +142,39 @@ namespace AzureStorageAnalyticsViewer
             }
         }
 
-        List<MetricsTransactionsEntity> DownloadTransactionMetrics(StorageType type,DateTime startdate, DateTime enddate)
+        List<MetricsTransactionsEntity> DownloadTransactionMetrics(StorageType type,DateTime startdate, DateTime enddate, bool useMinuteMetrics = false)
         {
-            try
+            MetricsTransactionsDataContext trancontext = new MetricsTransactionsDataContext(
+                _account.TableEndpoint.AbsoluteUri,
+                _account.Credentials, useMinuteMetrics);
+
+            IQueryable<MetricsTransactionsEntity> query = null;
+            switch (type)
             {
-                MetricsTransactionsDataContext trancontext = new MetricsTransactionsDataContext(
-                  _account.TableEndpoint.AbsoluteUri,
-                  _account.Credentials);
-
-                IQueryable<MetricsTransactionsEntity> query = null;
-                switch (type)
-                {
-                    case StorageType.Blob:
-                        query = trancontext.MetricsTransactionsBlob;
-                        break;
-                    case StorageType.Queue:
-                        query = trancontext.MetricsTransactionsQueue;
-                        break;
-                    case StorageType.Table:
-                        query = trancontext.MetricsTransactionsTable;
-                        break;
-                    default:
-                        break;
-                }
-
-                var list2 = (from item in query
-                             where item.PartitionKey.CompareTo(startdate.ToString("yyyyMMddTHHmm")) >= 0
-                             && item.PartitionKey.CompareTo(enddate.ToString("yyyyMMddTHHmm")) <= 0
-                             && item.RowKey == string.Format("{0};{1}", access_cb.SelectedValue, trans_cb.SelectedValue)
-                             select item).ToList();
-
-                //var ccc= list2.Select(m => m.RowKey).Distinct();
-
-                return list2;
+                case StorageType.Blob:
+                    query = trancontext.MetricsTransactionsBlob;
+                    break;
+                case StorageType.Queue:
+                    query = trancontext.MetricsTransactionsQueue;
+                    break;
+                case StorageType.Table:
+                    query = trancontext.MetricsTransactionsTable;
+                    break;
+                default:
+                    break;
             }
-            catch (Exception ex)
-            {
-                throw new Exception(
-                    string.Format("Failed to load metrics data, please check if storage account is correct, and if {0} metrics is enabled.", type));
-            }
+
+            query = (from item in query
+                            where item.PartitionKey.CompareTo(startdate.ToString("yyyyMMddTHHmm")) >= 0
+                            && item.PartitionKey.CompareTo(enddate.ToString("yyyyMMddTHHmm")) <= 0
+                            && item.RowKey == string.Format("{0};{1}", access_cb.SelectedValue, trans_cb.SelectedValue)
+                        select item).AsTableServiceQuery<MetricsTransactionsEntity>();
+
+            //var ccc= list2.Select(m => m.RowKey).Distinct();
+
+            var list2 = query.ToList();
+
+            return list2;
         }
 
         Dictionary<string, object> ConvertView(MetricsTransactionsEntity mte)
@@ -418,6 +424,8 @@ namespace AzureStorageAnalyticsViewer
             int maxDegreeOfParallelism = 1;
             int.TryParse(ConfigurationManager.AppSettings["maxDegreeOfParallelism"], out maxDegreeOfParallelism);
             filemaxsize *= (1024 * 1024);
+            bool TrimSuccessFromLog = false;
+            bool.TryParse(ConfigurationManager.AppSettings["TrimSuccessFromLog"], out TrimSuccessFromLog);
 
             int filecount = 1;
             long sizecount = 0;
@@ -458,29 +466,40 @@ namespace AzureStorageAnalyticsViewer
             Parallel.For(0, cluster.Count(), pOptions, i =>
             {
                 CloudBlob[] pBlobs = cluster[i].ToArray();
-                var first = pBlobs.First().Properties.LastModifiedUtc.ToString("yyyyMMdd-HHmmss");
-                var last = pBlobs.Last().Properties.LastModifiedUtc.ToString("yyyyMMdd-HHmmss");
-                var fname = filename.Substring(0, filename.Length - 4);
-                string outputCsvName = string.Format("{0}_{1}_{2}.{3}", fname, first, last,
-                    outputToCsv ? "csv" : "log"); 
-                    
-                Stream fs = File.Open(outputCsvName, FileMode.Create);
-                StreamWriter writer = new StreamWriter(fs);
-                writer.WriteLine(header);
-                    
-                for (int x = 0; x < pBlobs.Count() ; x++)
+                if (pBlobs.Count() > 0)
                 {
-                    var blob = pBlobs[x];
-                    var logstring = outputToCsv ? new StringBuilder(blob.DownloadText()).Replace(';', ',').ToString()
-                                                : blob.DownloadText();
-                    writer.Write(logstring);
-                }
-                writer.Close();
-                fs.Close();
+                    var first = pBlobs.First().Properties.LastModifiedUtc.ToString("yyyyMMdd-HHmmss");
+                    var last = pBlobs.Last().Properties.LastModifiedUtc.ToString("yyyyMMdd-HHmmss");
+                    var fname = filename.Substring(0, filename.Length - 4);
+                    string outputCsvName = string.Format("{0}{1}_{2}_{3}.{4}", fname, i.ToString("0000"), first, last,
+                        outputToCsv ? "csv" : "log"); 
+                    
+                    Stream fs = File.Open(outputCsvName, FileMode.Create);
+                    StreamWriter writer = new StreamWriter(fs);
+                    if (increment == 0)
+                    {
+                        writer.WriteLine(header);
+                    }
+                    for (int x = 0; x < pBlobs.Count() ; x++)
+                    {
+                        var blob = pBlobs[x];
+                        var logstring = outputToCsv ? new StringBuilder(blob.DownloadText()).Replace(';', ',').ToString()
+                                                    : blob.DownloadText();
+
+                        if (TrimSuccessFromLog)
+                        {
+                            logstring = string.Join("\r\n", logstring.Split('\n').Where(l => !l.Contains(",Success,")).ToArray());
+                        }
+                        writer.Write(logstring);
+                    }
+                    writer.Close();
+                    fs.Close();
                 
-                Interlocked.Add(ref increment, pBlobs.Count());
-                Interlocked.Increment(ref increment);
-                bw.ReportProgress(increment * 100 / blobs.Count());
+                    Interlocked.Add(ref increment, pBlobs.Count());
+                    Interlocked.Increment(ref increment);
+                    bw.ReportProgress(increment * 100 / blobs.Count());
+                }
+
 
             });
 
@@ -557,7 +576,7 @@ namespace AzureStorageAnalyticsViewer
         }
 
         // download metrics
-        private void Button_Click_1(object sender, RoutedEventArgs e)
+        private void HourlyClicker(object sender, RoutedEventArgs e)
         {
             if (_account == null)
             {
@@ -567,22 +586,64 @@ namespace AzureStorageAnalyticsViewer
 
             var startdate = start_dp.SelectedDate.Value.Add((TimeSpan)start_cb.SelectedItem);
             var enddate = end_dp.SelectedDate.Value.Add((TimeSpan)end_cb.SelectedItem);
-            var filename = string.Format("{0}_{1}_metrics_{2}__{3}.csv",
+
+
+            var hourlyMetricsFileName = string.Format("{0}_{1}_metrics_{2}_{3}_hour.csv",
                     _account.Credentials.AccountName,
                     _currentstoragetype,
                     startdate.ToString("yyyy_MM_dd_HHmm"),
                     enddate.ToString("yyyy_MM_dd_HHmm"));
-            if (_mtes == null)
-            {
-                _mtes = DownloadTransactionMetrics(_currentstoragetype, startdate, enddate);
-            }
 
             SaveFileDialog sfd = new SaveFileDialog();
-            sfd.FileName = filename;
+            sfd.FileName = hourlyMetricsFileName;
+            var result = sfd.ShowDialog();
+
+            if (result.HasValue && result.Value)
+            {
+                Stopwatch sw = new Stopwatch();
+                sw.Start();
+                var folder = new FileInfo(sfd.FileName).Directory.FullName;
+                // hourly metric download
+                _mtes = DownloadTransactionMetrics(_currentstoragetype, startdate, enddate);
+                SaveMetricsToFile(System.IO.Path.Combine(folder, hourlyMetricsFileName), _mtes);
+                sw.Stop();
+                DateTime downloadEnded = DateTime.Now;
+                MessageBox.Show(string.Format("Downloaded at {0} succeeded in {1}.", downloadEnded.ToString("HH:mm:ss tt zz"), sw.Elapsed));
+            }
+        }
+
+        // download metrics
+        private void MinuteClicker(object sender, RoutedEventArgs e)
+        {
+            if (_account == null)
+            {
+                MessageBox.Show("Storage account haven't been initialized");
+                return;
+            }
+
+            var startdate = start_dp.SelectedDate.Value.Add((TimeSpan)start_cb.SelectedItem);
+            var enddate = end_dp.SelectedDate.Value.Add((TimeSpan)end_cb.SelectedItem);
+            
+            var minuteMetricsFileName = string.Format("{0}_{1}_metrics_{2}_{3}_minutes.csv",
+                    _account.Credentials.AccountName,
+                    _currentstoragetype,
+                    startdate.ToString("yyyy_MM_dd_HHmm"),
+                    enddate.ToString("yyyy_MM_dd_HHmm"));
+
+            SaveFileDialog sfd = new SaveFileDialog();
+            sfd.FileName = minuteMetricsFileName;
             var result = sfd.ShowDialog();
             if (result.HasValue && result.Value)
             {
-                SaveMetricsToFile(sfd.FileName, _mtes);
+                Stopwatch sw = new Stopwatch();
+                sw.Start();
+                var folder = new FileInfo(sfd.FileName).Directory.FullName;
+                // hourly metric download
+                _mtes = DownloadTransactionMetrics(_currentstoragetype, startdate, enddate, true);
+                SaveMetricsToFile(System.IO.Path.Combine(folder, minuteMetricsFileName), _mtes);
+                sw.Stop();
+                DateTime downloadEnded = DateTime.Now;
+                MessageBox.Show(string.Format("Downloaded at {0} succeeded in {1}.", downloadEnded.ToString("HH:mm:ss tt zz"), sw.Elapsed));
             }
         }
         #endregion
