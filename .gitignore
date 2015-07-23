@@ -1,0 +1,10 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/AzureStorageAnalyticsViewer/bin/Debug/x64
+/AzureStorageAnalyticsViewer/bin/Debug/x86/app.publish
+/AzureStorageAnalyticsViewer/bin/Debug/x86
+/AzureStorageAnalyticsViewer/obj
+/packages
+/.vs/AzureStorageAnalyticsViewer/v14/.suo
