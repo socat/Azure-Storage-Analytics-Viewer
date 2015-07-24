@@ -10,12 +10,14 @@ namespace AzureStorageAnalyticsViewer.Entities
     {
 
         private bool useMinutesMetrics = false;
+        private StorageType storageType = StorageType.Table;
 
         public MetricsTransactionsDataContext(string baseAddress, Microsoft.WindowsAzure.StorageCredentials credentials,
-            bool useMinutes = false)
+            bool useMinutes = false, StorageType storage = StorageType.Table)
             : base(baseAddress, credentials)
         {
             this.useMinutesMetrics = useMinutes;
+            this.storageType = storage;
         }
 
 
@@ -33,28 +35,22 @@ namespace AzureStorageAnalyticsViewer.Entities
         internal string MetricsTableNamespace { get { return string.Format(metricsTableBaseFormatString, this.useMinutesMetrics ? "Minute" : "Hour"); } }
         internal string MetricsQueueNamespace { get { return string.Format(metricsQueueBaseFormatString, this.useMinutesMetrics ? "Minute" : "Hour"); } }
 
-        public IQueryable<MetricsTransactionsEntity> MetricsTransactionsBlob
+        public IQueryable<MetricsTransactionsEntity> MetricsTransaction
         {
             get
             {
-                return this.CreateQuery<MetricsTransactionsEntity>(this.MetricsBlobNamespace);
+                string metricsNamespace = this.MetricsTableNamespace;
+                if (storageType == StorageType.Blob)
+                {
+                    metricsNamespace = this.MetricsBlobNamespace;
+                }
+                else if (storageType == StorageType.Queue)
+                {
+                    metricsNamespace = this.MetricsQueueNamespace;
+                }
+                return this.CreateQuery<MetricsTransactionsEntity>(metricsNamespace);
             }
         }
-
-        public IQueryable<MetricsTransactionsEntity> MetricsTransactionsTable
-        {
-            get
-            {
-                return this.CreateQuery<MetricsTransactionsEntity>(this.MetricsTableNamespace);
-            }
-        }
-
-        public IQueryable<MetricsTransactionsEntity> MetricsTransactionsQueue
-        {
-            get
-            {
-                return this.CreateQuery<MetricsTransactionsEntity>(this.MetricsQueueNamespace);
-            }
-        }
+        
     }
 }
