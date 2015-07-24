@@ -135,6 +135,7 @@ namespace AzureStorageAnalyticsViewer
                         tcp1.DataContext = CompressDataPoints(_mtes);
                     }
                 }
+                _mtes = new List<MetricsTransactionsEntity>();
             }
             catch (Exception ex)
             {
@@ -144,37 +145,49 @@ namespace AzureStorageAnalyticsViewer
 
         List<MetricsTransactionsEntity> DownloadTransactionMetrics(StorageType type,DateTime startdate, DateTime enddate, bool useMinuteMetrics = false)
         {
-            MetricsTransactionsDataContext trancontext = new MetricsTransactionsDataContext(
-                _account.TableEndpoint.AbsoluteUri,
-                _account.Credentials, useMinuteMetrics);
+            List<MetricsTransactionsEntity> metricsResults = new List<MetricsTransactionsEntity>();
+            object threadLock = new object();
 
-            IQueryable<MetricsTransactionsEntity> query = null;
-            switch (type)
+            List<DateTime> dates = new List<DateTime>();
+            for (int i = 0; i < enddate.Subtract(startdate).TotalDays; i++)
             {
-                case StorageType.Blob:
-                    query = trancontext.MetricsTransactionsBlob;
-                    break;
-                case StorageType.Queue:
-                    query = trancontext.MetricsTransactionsQueue;
-                    break;
-                case StorageType.Table:
-                    query = trancontext.MetricsTransactionsTable;
-                    break;
-                default:
-                    break;
+                if (startdate.AddDays(i) < enddate)
+                {
+                    dates.Add(startdate.AddDays(i));
+                }
             }
+            ParallelOptions pOptions = new ParallelOptions();
+            pOptions.MaxDegreeOfParallelism = 20;
 
-            query = (from item in query
-                            where item.PartitionKey.CompareTo(startdate.ToString("yyyyMMddTHHmm")) >= 0
-                            && item.PartitionKey.CompareTo(enddate.ToString("yyyyMMddTHHmm")) <= 0
-                            && item.RowKey == string.Format("{0};{1}", access_cb.SelectedValue, trans_cb.SelectedValue)
-                        select item).AsTableServiceQuery<MetricsTransactionsEntity>();
+            object access = access_cb.SelectedValue;
+            object trans = trans_cb.SelectedValue;
 
-            //var ccc= list2.Select(m => m.RowKey).Distinct();
+            Parallel.For(0, dates.Count, pOptions, i => 
+            {
+                List<MetricsTransactionsEntity> results = new List<MetricsTransactionsEntity>();
+                DateTime start = (dates[i]);
+                DateTime end = (dates[i].AddDays(1) > enddate) ? enddate : dates[i].AddDays(1);
+                // Console.WriteLine("{0} - {1} thru {2}", i, dates[i].ToString("ddMMMyyyy HHmmss"), end.ToString("ddMMMyyyy HHmmss"));
+                MetricsTransactionsDataContext trancontext = new MetricsTransactionsDataContext(
+                    _account.TableEndpoint.AbsoluteUri,
+                    _account.Credentials, useMinuteMetrics, type);
 
-            var list2 = query.ToList();
+                IQueryable<MetricsTransactionsEntity> query = trancontext.MetricsTransaction;
+               
 
-            return list2;
+                results = (from item in query
+                         where item.PartitionKey.CompareTo(start.ToString("yyyyMMddTHHmm")) >= 0
+                         && item.PartitionKey.CompareTo(end.ToString("yyyyMMddTHHmm")) <= 0
+                         && item.RowKey == string.Format("{0};{1}", access, trans)
+                         select item).AsTableServiceQuery<MetricsTransactionsEntity>().ToList();
+                lock (threadLock)
+                {
+                    metricsResults.AddRange(results);
+                }
+                
+            });
+            
+            return DeDuplicate(metricsResults);
         }
 
         Dictionary<string, object> ConvertView(MetricsTransactionsEntity mte)
@@ -606,10 +619,16 @@ namespace AzureStorageAnalyticsViewer
                 // hourly metric download
                 _mtes = DownloadTransactionMetrics(_currentstoragetype, startdate, enddate);
                 SaveMetricsToFile(System.IO.Path.Combine(folder, hourlyMetricsFileName), _mtes);
+                _mtes = new List<MetricsTransactionsEntity>();
                 sw.Stop();
                 DateTime downloadEnded = DateTime.Now;
                 MessageBox.Show(string.Format("Downloaded at {0} succeeded in {1}.", downloadEnded.ToString("HH:mm:ss tt zz"), sw.Elapsed));
             }
+        }
+
+        private List<MetricsTransactionsEntity> DeDuplicate(List<MetricsTransactionsEntity> thelist) {
+            var DistinctItems = thelist.GroupBy(x => x.PartitionKey).Select(y => y.First());
+            return DistinctItems.ToList();
         }
 
         // download metrics
@@ -641,6 +660,7 @@ namespace AzureStorageAnalyticsViewer
                 // hourly metric download
                 _mtes = DownloadTransactionMetrics(_currentstoragetype, startdate, enddate, true);
                 SaveMetricsToFile(System.IO.Path.Combine(folder, minuteMetricsFileName), _mtes);
+                _mtes = new List<MetricsTransactionsEntity>();
                 sw.Stop();
                 DateTime downloadEnded = DateTime.Now;
                 MessageBox.Show(string.Format("Downloaded at {0} succeeded in {1}.", downloadEnded.ToString("HH:mm:ss tt zz"), sw.Elapsed));
